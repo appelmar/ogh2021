@@ -1,0 +1,426 @@
+---
+title: "Tutorial: Analyzing massive amounts of EO data in the cloud with R, gdalcubes, and STAC"
+author: "Marius Appel"
+date: "Sept. 1, 2021"
+bibliography: references.bib
+link-citations: yes
+csl: american-statistical-association.csl
+output: 
+  html_document:
+    toc: true
+    toc_float:  
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 2
+    theme: flatly
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+figtrim <- function(path) {
+  img <- magick::image_trim(magick::image_read(path))
+  magick::image_write(img, path)
+  path
+}
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_chunk$set(eval = FALSE)
+knitr::opts_chunk$set(out.width = "100%")
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(dev = "jpeg")
+knitr::opts_chunk$set(fig.process = figtrim)
+knitr::opts_chunk$set(fig.width = 15, fig.height = 7.5)
+```
+
+**OpenGeoHub Summer School 2021**
+
+*Please notice that code chunks in this document are meant to be executed on a Amazon Web Services (AWS) machine in region `us-west-2` (Oregon).*
+
+# Introduction
+
+This tutorial demonstrates how we can access and process Sentinel-2 data in the cloud using the R packages [`rstac`](https://cran.r-project.org/package=rstac) [@rstac] and [`gdalcubes`](https://cran.r-project.org/package=gdalcubes) [@gdalcubes].
+
+Two examples on the creation of composite images and more complex time series analysis will introduce important functions of both packages.
+
+Other packages used in this tutorial include [`stars`](https://cran.r-project.org/package=stars)[@stars] and [`tmap`](https://cran.r-project.org/package=tmap)[@tmap] for creating interactive maps, [`sf`](https://cran.r-project.org/package=sf)[@sf] for processing vector data, and [`colorspace`](https://cran.r-project.org/package=colorspace)[@colorspace] for visualizations with accessible colors.
+
+*Notice that the examples have been selected to yield computation times acceptable for a live demonstration. Please feel free to apply the examples on larger areas of interest and/or using a higher spatial resolution.*
+
+# Example 1: Creating composite images
+
+Our study area (the main land of the Netherlands) is given in a (poorly) digitized GeoPackage file `NL.gpkg`. We can create a simple interactive map using the `sf` and `tmap` packages by running:
+
+```{r}
+library(sf)
+nl_shape = read_sf("NL.gpkg")
+library(tmap)
+tmap_mode("view")
+tm_shape(st_geometry(nl_shape)) +  tm_polygons()
+```
+
+Looking at the features, we see that:
+
+```{r}
+st_crs(nl_shape)
+```
+
+We aim at generating a cloud-free composite image of our study area for June, 2018 and we use the `rstac` package to find suitable Sentinel-2 images. However, to use the `bbox` argument of the corresponding function `stac_search()` for spatial filtering, we first need to derive and transform the bounding box to latitude / longitude (WGS84) values, for which we use the `st_bbox()` and `st_transform()` functions.
+
+```{r}
+bbox = st_bbox(nl_shape) 
+bbox
+
+st_as_sfc(bbox) |>
+  st_transform("EPSG:4326") |>
+  st_bbox() -> bbox_wgs84
+bbox_wgs84
+```
+
+## Querying images with `rstac`
+
+Now, specify our STAC-API endpoint, and post a STAC search request using the transformed bounding box, the datetime range, and the collection name "sentinel-s2-l2a-cogs".
+
+```{r}
+library(rstac)
+s = stac("https://earth-search.aws.element84.com/v0")
+
+items <- s |>
+  stac_search(collections = "sentinel-s2-l2a-cogs",
+              bbox = c(bbox_wgs84["xmin"],bbox_wgs84["ymin"],bbox_wgs84["xmax"],bbox_wgs84["ymax"]), 
+              datetime = "2018-06-01/2018-06-30",
+              limit = 500) |>
+  post_request() 
+items
+```
+
+By default, the result of the used SPAC API contains only up to 10 items and we need to increase this value using the `limit` argument. Here, we got a list of 260 STAC items.
+
+Looking at one of the items, we see:
+
+```{r}
+names(items$features[[10]])
+```
+
+The `assets` element contains direct links to the image files for separate bands and the properties element contains a lot of useful metadata including cloud coverage, datetime, projection, and more:
+
+```{r}
+items$features[[10]]$assets$B05
+items$features[[10]]$properties$`eo:cloud_cover`
+```
+
+## Creating an image collection
+
+Next, we load the `gdalcubes` package and use this list of features from `rstac` to create a gdalcubes image collection object with the `stac_image_collection()` function. Compared to using gdalcubes with imagery on local storage, this does not need to open and read metadata from all files because STAC items already contain all relevant metadata including datetime, spatial extent, and how files relate to bands. As a result, creation of an image collection from STAC is quite fast.
+
+```{r}
+library(gdalcubes)
+s2_collection = stac_image_collection(items$features)
+s2_collection
+```
+
+However, this function takes some further useful arguments. First, we see that our image collection does not contain the `SCL` band that contains information on cloud and cloud shadow pixels. This band is ignored by default, because it is missing the `eo:bands` properties in the STAC API response. As an alternative to consider this band, we can specify asset names manually using the `asset_names` argument. Second, the result contains all images although there are some with almost no clear pixels. To reduce the number of images, we can provide a function as the `property_filter` argument. This function receives the properties element (a list) of a STAC item as argument and is expected to produce a single logical value, where an image is ignored if the function returns FALSE.
+
+```{r}
+assets = c("B01","B02","B03","B04","B05","B06", "B07","B08","B8A","B09","B11","SCL")
+ s2_collection = stac_image_collection(items$features, asset_names = assets, property_filter = function(x) {x[["eo:cloud_cover"]] < 20})
+s2_collection
+```
+
+As a result we get an image collection with 92 images and the `SCL` band.
+
+## Defining the data cube geometry
+
+The next step in gdalcubes is to specify the geometry of our target data cube, which is called the *data cube view*. The data cube view is independent from specific image collections and hence does not contain information on spectral bands. In the following code, we use the `cube_view()` function to create and specify a coarse resolution data cube with cell size 200m x 200m x 30 days, using the Lambert equal area projection for Europe:
+
+```{r}
+v.NL.overview = cube_view(srs="EPSG:3035",  dx=200, dy=200, dt="P30D", 
+                  aggregation="median", resampling = "average",
+                  extent=list(t0 = "2018-06-01", t1 = "2018-06-30",
+                              left=bbox["xmin"]-1000, right=bbox["xmax"]+1000,
+                              top=bbox["ymax"] + 1000, bottom=bbox["ymin"]-1000))
+v.NL.overview
+```
+
+The messages simply tell us that the extent of the data cube has been enlarged because there can't be anything like partial pixels. Notice that the resampling and aggregation methods define how pixels will be resampled in space and how pixel values from different days within the same data cube cell will be aggregated while aligning images with the target cube geometry. Our data cube geometry has 1595 x 1387 x 1 pixels in space and time directions respectively.
+
+## Creating, processing, and plotting the data cube
+
+Afterwards, we can combine our image collection and cube view and create, process, and plot our actual data cube. To ignore pixels that have been classified as clouds or cloud shadows in individual images, we first need to create a mask object that simply tells gdalcubes that corresponding pixels with values 3,8, or 9 (see [here](https://sentinels.copernicus.eu/web/sentinel/technical-guides/sentinel-2-msi/level-2a/algorithm)) in the SCL band will not contribute to the data cube values and ignored during the temporal aggregation step.
+
+The `raster_cube()` function then takes the image collection, data cube view, and the mask, and creates a virtual data cube. Calling this function does not start any computations or data transfers but simply returns a proxy object, which knows *what to do*. The functions `select_bands()` and `filter_geom()` to subset spectral bands and crop a data cube by a polygon repsectively both take a data cube as an input and produce a proxy object (or virtual data cube) as a result. Calling `plot()` will eventually start all the computations and plot the result. Computations are multithreaded (we use up to 16 threads here) and no intermediate results of the operations are written to disk.
+
+```{r}
+S2.mask = image_mask("SCL", values = c(3,8,9))
+
+gdalcubes_options(threads = 16)
+
+system.time(
+  raster_cube(s2_collection, v.NL.overview, S2.mask) |>
+    select_bands(c("B02", "B03", "B04")) |>
+    filter_geom(nl_shape$geom) |>
+    plot(rgb = 3:1, zlim=c(0,1500)))
+```
+
+If we are interested in a smaller area at higher resolution, we can create a data cube with a different data cube view as in the following example.
+
+```{r}
+v.amsterdam = cube_view(srs="EPSG:3035",  dx=10, dy=10, dt="P30D", 
+                  aggregation="median", resampling = "average",
+                  extent=list(t0 = "2018-06-01", t1 = "2018-06-30",
+                              left = 3968584, right = 3979617,
+                              top = 3266445, bottom = 3259740))
+
+raster_cube(s2_collection, v.amsterdam, S2.mask) |>
+  select_bands(c("B02", "B03", "B04")) |>
+  plot(rgb = 3:1, zlim=c(0,1500))
+```
+
+## Operations on data cubes
+
+The gdalcubes package comes with some built-in operations to process data cubes. The following operations produce a derived data cube from one or more input data cubes.
+
++----------------+----------------------------------------------------------------------------+
+| Operator       | Description                                                                |
++================+============================================================================+
+| `apply_pixel`  | Apply arithmetic expressions on band values per pixel.                     |
++----------------+----------------------------------------------------------------------------+
+| `fill_time`    | Fill missing values by simple time-series interpolation.                   |
++----------------+----------------------------------------------------------------------------+
+| `filter_pixel` | Filter pixels based on logical expressions.                                |
++----------------+----------------------------------------------------------------------------+
+| `filter_geom`  | Filter pixels that do not intersect with a given input geometry            |
++----------------+----------------------------------------------------------------------------+
+| `join_bands`   | Combine bands of two or more identically shaped input data cubes.          |
++----------------+----------------------------------------------------------------------------+
+| `reduce_space` | Apply a reducer function over time slices of a data cube.                  |
++----------------+----------------------------------------------------------------------------+
+| `reduce_time`  | Apply a reducer function over individual pixel time series.                |
++----------------+----------------------------------------------------------------------------+
+| `select_bands` | Select a subset of a data cube's bands.                                    |
++----------------+----------------------------------------------------------------------------+
+| `window_time`  | Apply a moving window reducer of kernel over individual pixel time series. |
++----------------+----------------------------------------------------------------------------+
+
+There are some more functions for exporting data cubes as netCDF or (cloud-optimized) GeoTIFF files, to read data cubes from netCDF files, to compute summary statistics over polygons (zonal statistics), to query data cube values by irregular spatiotemporal points, and to create animations.
+
+In the example below, we compute the normalized difference vegetation index (NDVI), leave out values with NDVI \< 0 and plot the example. A custom color palette from the colorspace package is used to use light yellow for lower and green for higher NDVI values.
+
+```{r}
+library(colorspace)
+ndvi.col = function(n) {
+  rev(sequential_hcl(n, "Green-Yellow"))
+}
+
+raster_cube(s2_collection, v.NL.overview, S2.mask) |>
+  select_bands(c("B04", "B08")) |>
+  filter_geom(nl_shape$geom) |>
+  apply_pixel("(B08-B04)/(B08+B04)", "NDVI") |>
+  filter_pixel("NDVI > 0") |>
+  plot(key.pos = 1, zlim=c(0,1), col = ndvi.col)
+```
+
+We can see that some additional water areas with NDVI \< 0 have been set to NA.
+
+## Interactive maps
+
+We can convert data cubes to `stars` objects and use `tmap` for interactive mapping:
+
+```{r}
+library(stars)
+raster_cube(s2_collection, v.NL.overview, S2.mask) |>
+  select_bands(c("B04", "B08")) |>
+  filter_geom(nl_shape$geom) |>
+  apply_pixel("(B08-B04)/(B08+B04)", "NDVI") |>
+  filter_pixel("NDVI > 0") |>
+  st_as_stars() |>
+  tm_shape() + tm_raster()
+```
+
+## Summary
+
+This example has shown how satellite imagery can be accessed and analyzed in the cloud using STAC and gdalcubes. The analysis has been rather simple by creating cloud-free composite images for only one month. However, the data originated from 92 Sentinel-2 images and downloading all the data first would certainly need some time. Due to the availability of data, it is straightforward to run the analysis in a different area of interest and hence checking the transferability of methods may become somewhat easier. The second example will focus on more complex time series processing for a smaller area.
+
+# Example 2: Time series analysis
+
+This example shows how complex times series methods from external R packages can be applied in cloud computing environments using [`rstac`](https://cran.r-project.org/package=rstac) [@rstac] and [`gdalcubes`](https://cran.r-project.org/package=gdalcubes) [@gdalcubes]. We will use the [`bfast` R package](https://cran.r-project.org/package=bfast)[@verbesselt2010] containing unsupervised change detection methods identifying structural breakpoints in vegetation index time series. Specifically, we will use the `bfastmonitor()` function to monitor changes on a time series of Sentinel-2 imagery.
+
+Compared to the first example, our study area is rather small, covering a small forest area in the southeast of Berlin. The area of interest is again available as a polygon in a GeoPackage file `gruenheide_forest.gpkg`, which for example can be visualized in a map using the [`tmap` package](https://cran.r-project.org/package=tmap)[@tmap] package.
+
+```{r}
+library(sf)
+geom = read_sf("gruenheide_forest.gpkg")
+library(tmap)
+tmap_mode("view")
+tm_shape(st_geometry(geom)) +  tm_polygons()
+```
+
+## Querying images with `rstac`
+
+Using the `rstac` package, we first request all available images from 2016 to 2020 that intersect with our region of interest. Here, since the polygon has WGS84 as CRS, we do **not** need to transform the bounding box before using the `stac_search()` function.
+
+```{r}
+s = stac("https://earth-search.aws.element84.com/v0")
+
+bbox = st_bbox(geom)  
+
+items <- s |>
+    stac_search(collections = "sentinel-s2-l2a-cogs",
+                bbox = c(bbox["xmin"],bbox["ymin"],bbox["xmax"],bbox["ymax"]), 
+                datetime = "2016-01-01/2020-12-31",
+                limit = 500) |>
+    post_request() 
+items
+
+# Date and time of first and last images
+range(sapply(items$features, function(x) {x$properties$datetime}))
+```
+
+This gives us 457 images recorded between Nov. 2016 and Dec. 2020.
+
+## Creating a monthly Sentinel-2 data cube
+
+To build a regular monthly data cube, we again need to create a gdalcubes image collection from the STAC query result. Notice that to include the `SCL` band containing per-pixel quality flags (classification as clouds, cloud-shadows, and others), we need to explicitly list the names of the assets. We furthermore ignore images with 50% or more cloud coverage.
+
+```{r}
+library(gdalcubes)
+assets = c("B01","B02","B03","B04","B05","B06", "B07","B08","B8A","B09","B11","SCL")
+s2_collection = stac_image_collection(items$features, asset_names = assets, property_filter = function(x) {x[["eo:cloud_cover"]] < 50}) 
+s2_collection
+```
+
+The result still contains 200 images, from which we can now create a data cube. We use the transformed (UTM) bounding box of our polygon as spatial extent, 10 meters spatial resolution, bilinear spatial resampling and derive monthly median values for all pixel values from multiple images within a month, if available. Notice that we add 100m to each side of the cube.
+
+```{r}
+st_as_sfc(bbox) |>
+  st_transform("EPSG:32633") |>
+  st_bbox() -> bbox_utm
+  
+v = cube_view(srs = "EPSG:32633", extent = list(t0 = "2016-01",  t1 = "2020-12", 
+                                                left = bbox_utm["xmin"] - 100, 
+                                                right = bbox_utm["xmax"] + 100, 
+                                                bottom = bbox_utm["ymin"] - 100, 
+                                                top = bbox_utm["ymax"] + 100), 
+              dx = 10, dy = 10, dt = "P1M",  aggregation = "median", 
+              resampling = "bilinear")
+v
+```
+
+Next, we create a data cube, subset the red and near infrared bands and crop by our polygon, which simply sets pixel values outside of the polygon to NA. Afterwards we save the data cube as a single netCDF file. Notice that this is not neccessary but storing intermediate results makes debugging sometimes easier, especially if the methods applied afterwards are computationally intensive.
+
+```{r, echo=FALSE, results='hide'}
+if (file.exists("gruenheide_cube_monthly.nc")) 
+  file.remove("gruenheide_cube_monthly.nc")
+```
+
+```{r}
+s2.mask = image_mask("SCL", values = c(3,8,9))
+gdalcubes_options(threads = 16, ncdf_compression_level = 5)
+raster_cube(s2_collection, v, mask = s2.mask) |>
+  select_bands(c("B04","B08")) |>
+  filter_geom(geom$geometry) |>
+  write_ncdf("gruenheide_cube_monthly.nc")
+```
+
+## Reduction over space and time
+
+To get an overview of the data, we can compute simple summary statistics (applying reducer functions) over dimensions. Below, we derive minimum, maximum, and mean monthly NDVI values over all pixel time series.
+
+```{r}
+ncdf_cube("gruenheide_cube_monthly.nc") |>
+  apply_pixel("(B08-B04)/(B08+B04)", "NDVI") |>
+  reduce_time("min(NDVI)", "max(NDVI)", "mean(NDVI)") |>
+  plot(key.pos = 1, zlim=c(-0.2,1), col = ndvi.col, nbreaks = 19)
+```
+
+Possible reducers include `"min"`, `"mean"`, `"median"`, `"max"`, `"count"` (count non-missing values), `"sum"`, `"var"` (variance), and `"sd"` (standard deviation). Reducer expressions are always given as a string starting with the reducer name followed by the band name in parentheses. Notice that it is possible to mix reducers and bands.
+
+The `"count"` reducer is often very useful to get an initial understanding of an image collection:
+
+```{r}
+ncdf_cube("gruenheide_cube_monthly.nc") |>
+  reduce_time("count(B04)") |>
+  plot(key.pos = 1, zlim=c(0,60), col = viridis::viridis, nbreaks = 7)
+```
+
+We can see that most time series contain valid observations for 40-50 months, which should be sufficient for our example. Similarly, it is also possible to reduce over space, leading to summary time series.
+
+```{r}
+ncdf_cube("gruenheide_cube_monthly.nc") |>
+  apply_pixel("(B08-B04)/(B08+B04)", "NDVI") |>
+  reduce_space("min(NDVI)", "max(NDVI)", "mean(NDVI)") |>
+  plot(join.timeseries = TRUE)
+```
+
+## Applying bfastmonitor as a user-defined reducer function
+
+To apply a more complex time series method such as `bfastmonitor()`, the data cube operations below allow to provide custom user-defined R functions instead of string expressions, which translate to built-in reducers. It is very important that these functions receive arrays as input and must return arrays as output, too. Depending on the operation, the dimensionality of the arrays is different:
+
++----------------+---------------------------------------------------------+------------------------------------+
+| Operator       | Input                                                   | Output                             |
++================+=========================================================+====================================+
+| `apply_pixel`  | Vector of band values for one pixel                     | Vector of band values of one pixel |
++----------------+---------------------------------------------------------+------------------------------------+
+| `reduce_time`  | Multi-band time series as a matrix                      | Vector of band values              |
++----------------+---------------------------------------------------------+------------------------------------+
+| `reduce_space` | Three-dimensional array with dimensions bands, x, and y | Vector of band values              |
++----------------+---------------------------------------------------------+------------------------------------+
+| `apply_time`   | Multi-band time series as a matrix                      | Multi-band time series as a matrix |
++----------------+---------------------------------------------------------+------------------------------------+
+
+There is no limit in what we can do in the provided R function, but we must take care of a few things:
+
+1.  The reducer function is executed in a new R process without access to the current workspace. It is not possible to access variables defined outside of the function and packages must be loaded **within** the function.
+
+2.  The reducer function **must** always return a vector with the same length (for all time series).
+
+3.  It is a good idea to think about `NA` values, i.e. you should check whether the complete time series is `NA`, and that missing values do not produce errors.
+
+Another possibility to apply R functions to data cubes is of course to convert data cubes to `stars` objects and use the `stars` package.
+
+In our example, `bfastmonitor()` returns change date and change magnitude values per time series and we can use `reduce_time()`. The script below calculates the [kNDVI](https://advances.sciencemag.org/content/7/9/eabc7447), applies `bfastmonitor()`, and properly handles errors e.g. due to missing data with `tryCatch()`. Finally, resulting change dates and magnitudes for all pixel time series are written to disk as a netCDF file.
+
+```{r, echo=FALSE,results='hide'}
+if (file.exists("result.nc")) 
+  file.remove("result.nc")
+```
+
+```{r}
+ncdf_cube("gruenheide_cube_monthly.nc") |>
+  reduce_time(names = c("change_date", "change_magnitude"), FUN = function(x) {
+    knr <- exp(-((x["B08",]/10000)-(x["B04",]/10000))^2/(2))
+    kndvi <- (1-knr) / (1+knr)   
+    if (all(is.na(kndvi))) {
+      return(c(NA,NA))
+    }
+    kndvi_ts = ts(kndvi, start = c(2016, 1), frequency = 12)
+    library(bfast)
+    tryCatch({
+        result = bfastmonitor(kndvi_ts, start = c(2020,1), level = 0.01)
+        return(c(result$breakpoint, result$magnitude))
+      }, error = function(x) {
+        return(c(NA,NA))
+      })
+  }) |>
+  write_ncdf("result.nc")
+```
+
+Running `bfastmonitor()` is computationally expensive. However, since the data is located in the cloud anyway, it would be obvious to launch one of the more powerful machine instance types with many processors. Parallelization within one instance can be controlled entirely by `gdalcubes` using `gdalcubes_options()`.
+
+## Results
+
+To visualize the change detection results, we load the resulting netCDF file, convert it to a `stars` object, and finally use the `tmap` package to create an interactive map to visualize the change date.
+
+```{r, out.width="100%"}
+library(stars)
+ncdf_cube("result.nc") |>
+  st_as_stars() ->x
+tm_shape(x["change_date"]) + tm_raster()
+```
+
+The result certainly needs some postprocessing to understand types of changes and to identify false positives. The larger region in the west of the study area however clearly shows some deforestation due to the construction of Tesla's Gigafactory Berlin-Brandenburg.
+
+## Summary
+
+This example has shown how more complex time series methods as from external R packages can be applied on data cubes in cloud computing environments. For computationally intensive methods, it is in many cases useful to store intermediate results by combining `write_ncdf()` and `ncdf_cube()`. A more powerful instance type would be very useful to scale the presented analysis to larger areas and to reduce computation times further.
+
+# References
