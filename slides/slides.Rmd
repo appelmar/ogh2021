@@ -100,7 +100,7 @@ class: center middle
 
 1. **Introduction**: Cloud computing, EO data in the cloud, STAC, COG, and gdalcubes  
   
-2. **Examples**
+2. **Live examples**
   1. Creating composite images
   2. Complex time series analysis
   
@@ -142,7 +142,7 @@ In this tutorial, we will use a custom machine on AWS to analyze EO data _in the
 | Provider | Data |
 | -------- | -------------- |
 | Amazon web services (AWS) | Sentinel, Landsat, ERA 5, OSM, CMIP 6, and more, see [here](https://registry.opendata.aws/?search=tags:gis,earth%20observation,events,mapping,meteorological,environmental,transportation)
-| Google Cloud | Landsat, Sentinel, [access to GEE data](https://developers.google.com/earth-engine/cloud/earthengine_cloud_project_setup)
+| Google Cloud Platform | Landsat, Sentinel, [access to GEE data](https://developers.google.com/earth-engine/cloud/earthengine_cloud_project_setup)
 | Copernicus DIASes | Sentinel + more (see [here](https://earsc.org/dias-comparison/))
 
 
@@ -205,7 +205,7 @@ class: inverse center middle
 
 ## Object Storage: S3
 
-EC2 machines have local storage (EBS) but big data archives use **object storage** as abstraction of storage.
+EC2 machines have local storage (EBS) but big data archives use highly scalable **object storage**.
 
 S3 elements:
 
@@ -254,7 +254,7 @@ Object:
 ---
 class: inverse center middle
 
-# Cloud-native satellite imagery access with STAC-API and COGs
+# Cloud-native satellite imagery access<br/>with STAC-API and COGs
 
 
 ---
@@ -416,7 +416,7 @@ class: inverse center middle
 
 # Live examples<br/>
 
-see [https://github.com/appelmar/ogh2021/tutorial/tutorial.Rmd](https://github.com/appelmar/ogh2021/tutorial/tutorial.Rmd)
+see [https://appelmar.github.io/ogh2021/tutorial.html](https://appelmar.github.io/ogh2021/tutorial.html)
 
 
 ---
@@ -430,7 +430,7 @@ class: inverse center middle
 
 ## Pros and cons of EO data analysis in the cloud
 
-**Neutral**: Workflow is based on the existence of STAC-API services and imagery as COGs!
+Workflow is based on the existence of STAC-API services and imagery as COGs!
 
 .pull-left[
 ### Advantages

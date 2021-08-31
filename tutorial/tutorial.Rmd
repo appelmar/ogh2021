@@ -48,7 +48,7 @@ Other packages used in this tutorial include [`stars`](https://cran.r-project.or
 
 # Example 1: Creating composite images
 
-Our study area (the main land of the Netherlands) is given in a (poorly) digitized GeoPackage file `NL.gpkg`. We can create a simple interactive map using the `sf` and `tmap` packages by running:
+Our study area (the main land area of the Netherlands) is given in a (poorly) digitized GeoPackage file `NL.gpkg`. We can create a simple interactive map using the `sf` and `tmap` packages by running:
 
 ```{r}
 library(sf)
@@ -78,15 +78,16 @@ bbox_wgs84
 
 ## Querying images with `rstac`
 
-Now, specify our STAC-API endpoint, and post a STAC search request using the transformed bounding box, the datetime range, and the collection name "sentinel-s2-l2a-cogs".
+Now, we can specify our STAC-API endpoint, and post a STAC search request using the transformed bounding box, the datetime range, and the collection name "sentinel-s2-l2a-cogs".
 
 ```{r}
 library(rstac)
 s = stac("https://earth-search.aws.element84.com/v0")
 
-items <- s |>
+items = s |>
   stac_search(collections = "sentinel-s2-l2a-cogs",
-              bbox = c(bbox_wgs84["xmin"],bbox_wgs84["ymin"],bbox_wgs84["xmax"],bbox_wgs84["ymax"]), 
+              bbox = c(bbox_wgs84["xmin"],bbox_wgs84["ymin"],
+                       bbox_wgs84["xmax"],bbox_wgs84["ymax"]), 
               datetime = "2018-06-01/2018-06-30",
               limit = 500) |>
   post_request() 
@@ -164,10 +165,8 @@ system.time(
 If we are interested in a smaller area at higher resolution, we can create a data cube with a different data cube view as in the following example.
 
 ```{r}
-v.amsterdam = cube_view(srs="EPSG:3035",  dx=10, dy=10, dt="P30D", 
-                  aggregation="median", resampling = "average",
-                  extent=list(t0 = "2018-06-01", t1 = "2018-06-30",
-                              left = 3968584, right = 3979617,
+v.amsterdam = cube_view(view = v.NL.overview, dx=10, dy=10,
+                  extent=list(left = 3968584, right = 3979617,
                               top = 3266445, bottom = 3259740))
 
 raster_cube(s2_collection, v.amsterdam, S2.mask) |>
@@ -184,7 +183,7 @@ The gdalcubes package comes with some built-in operations to process data cubes.
 +================+============================================================================+
 | `apply_pixel`  | Apply arithmetic expressions on band values per pixel.                     |
 +----------------+----------------------------------------------------------------------------+
-| `fill_time`    | Fill missing values by simple time-series interpolation.                   |
+| `fill_time`    | Fill missing values by simple time series interpolation.                   |
 +----------------+----------------------------------------------------------------------------+
 | `filter_pixel` | Filter pixels based on logical expressions.                                |
 +----------------+----------------------------------------------------------------------------+
@@ -198,12 +197,12 @@ The gdalcubes package comes with some built-in operations to process data cubes.
 +----------------+----------------------------------------------------------------------------+
 | `select_bands` | Select a subset of a data cube's bands.                                    |
 +----------------+----------------------------------------------------------------------------+
-| `window_time`  | Apply a moving window reducer of kernel over individual pixel time series. |
+| `window_time`  | Apply a moving window reducer or kernel over individual pixel time series. |
 +----------------+----------------------------------------------------------------------------+
 
 There are some more functions for exporting data cubes as netCDF or (cloud-optimized) GeoTIFF files, to read data cubes from netCDF files, to compute summary statistics over polygons (zonal statistics), to query data cube values by irregular spatiotemporal points, and to create animations.
 
-In the example below, we compute the normalized difference vegetation index (NDVI), leave out values with NDVI \< 0 and plot the example. A custom color palette from the colorspace package is used to use light yellow for lower and green for higher NDVI values.
+In the example below, we compute the normalized difference vegetation index (NDVI), leave out values with NDVI \<= 0 and plot the example. A custom color palette from the colorspace package is used to use light yellow for lower and green for higher NDVI values.
 
 ```{r}
 library(colorspace)
@@ -288,18 +287,18 @@ s2_collection = stac_image_collection(items$features, asset_names = assets, prop
 s2_collection
 ```
 
-The result still contains 200 images, from which we can now create a data cube. We use the transformed (UTM) bounding box of our polygon as spatial extent, 10 meters spatial resolution, bilinear spatial resampling and derive monthly median values for all pixel values from multiple images within a month, if available. Notice that we add 100m to each side of the cube.
+The result still contains 200 images, from which we can now create a data cube. We use the transformed (UTM) bounding box of our polygon as spatial extent, 10 meter spatial resolution, bilinear spatial resampling and derive monthly median values for all pixel values from multiple images within a month, if available. Notice that we add 100m to each side of the cube.
 
 ```{r}
 st_as_sfc(bbox) |>
   st_transform("EPSG:32633") |>
   st_bbox() -> bbox_utm
   
-v = cube_view(srs = "EPSG:32633", extent = list(t0 = "2016-01",  t1 = "2020-12", 
-                                                left = bbox_utm["xmin"] - 100, 
-                                                right = bbox_utm["xmax"] + 100, 
-                                                bottom = bbox_utm["ymin"] - 100, 
-                                                top = bbox_utm["ymax"] + 100), 
+v = cube_view(srs = "EPSG:32633", extent = list(t0 = "2016-01",t1 = "2020-12", 
+                                                left = bbox_utm["xmin"]-100, 
+                                                right = bbox_utm["xmax"]+100,
+                                                bottom = bbox_utm["ymin"]-100, 
+                                                top = bbox_utm["ymax"]+100), 
               dx = 10, dy = 10, dt = "P1M",  aggregation = "median", 
               resampling = "bilinear")
 v
@@ -385,6 +384,7 @@ if (file.exists("result.nc"))
 ```
 
 ```{r}
+system.time(
 ncdf_cube("gruenheide_cube_monthly.nc") |>
   reduce_time(names = c("change_date", "change_magnitude"), FUN = function(x) {
     knr <- exp(-((x["B08",]/10000)-(x["B04",]/10000))^2/(2))
@@ -395,13 +395,14 @@ ncdf_cube("gruenheide_cube_monthly.nc") |>
     kndvi_ts = ts(kndvi, start = c(2016, 1), frequency = 12)
     library(bfast)
     tryCatch({
-        result = bfastmonitor(kndvi_ts, start = c(2020,1), level = 0.01)
+        result = bfastmonitor(kndvi_ts, start = c(2020,1), 
+                              history = "all", level = 0.01)
         return(c(result$breakpoint, result$magnitude))
       }, error = function(x) {
         return(c(NA,NA))
       })
   }) |>
-  write_ncdf("result.nc")
+  write_ncdf("result.nc"))
 ```
 
 Running `bfastmonitor()` is computationally expensive. However, since the data is located in the cloud anyway, it would be obvious to launch one of the more powerful machine instance types with many processors. Parallelization within one instance can be controlled entirely by `gdalcubes` using `gdalcubes_options()`.
