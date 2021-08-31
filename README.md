@@ -6,7 +6,7 @@
 
 ## Links
 
-- Slides: [HTML](https://appelmar.github.io/ogh2021/slides.html), [PDF _tbd_]()
+- Slides: [PDF]()
 - Tutorial Notebook (practical part): [HTML](https://appelmar.github.io/ogh2021/tutorial.html), [R Markdown sources](https://github.com/appelmar/ogh2021/blob/main/tutorial/tutorial.Rmd)
 
 
