@@ -1,6 +1,6 @@
 # Install R, RStudioServer, and system libraries on AWS machines with Ubuntu Server OS
 
-There are several ways how software can be installed on AWS machines. In this guide, we will not install all software directly on the machine but use Docker as an additional tool to make use of available _recipes_ (Dockerfiles) how to install recent R and RStudioServer on Linux.
+There are several ways how software can be installed on AWS machines. In this guide, we will **not** install all software directly on the machine but use Docker as an additional tool to make use of available _recipes_ (Dockerfiles) how to install recent R and RStudioServer on Linux.
 In this guide, we will assume that the machine has already been launched. The setup requires the following steps:
 
 1. Login to the machine via SSH
@@ -51,8 +51,7 @@ apt install libproj-dev libgdal-dev gdal-bin libnetcdf-dev libudunits2-dev
 
 ## 5. Install R packages
 
-Open your browser and access Rstudio: http://x.x.x.x:8787. If this does **not** give a a login screen but a _URL not found_ message, you most likely need to add the security role for port 8787 in the AWS machine settings. 
-
+Open your browser and access Rstudio: http://x.x.x.x:8787. If this does **not** give a a login screen but a _URL not found_ message, you most likely need to add a security rule for making port 8787 accessible in the AWS machine settings. 
 
 If the login screen shows up, congratulations, you can login using `rstudio` as username and the password given before.
 After successflul login, you can install packages as on your local machine, e.g. with:
